@@ -36,9 +36,9 @@ Compiles universal macOS framework (x86_64 and arm64) with dSYMs:
 This will put them into 'wbrtc/src/out/macos' subfolder
 
 ### Step 4: Combine *.xcframework*
-Compiles universal macOS framework (x86_64 and arm64) with dSYMs:
+Combines .framework files into multiplatform *WebRTC.xcframework*:
 ```bash
-./scripts/combine_xcramework.sh ios/device ios/simulator macos
+./scripts/combine_xcframework.sh ios/device ios/simulator macos
 ```
 Where `ios/device ios/simulator macos` are folder names relative to `src/out` directory where artifacts from
 previous steps are placed.

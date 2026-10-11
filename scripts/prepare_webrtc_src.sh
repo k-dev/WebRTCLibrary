@@ -73,6 +73,6 @@ fi
 
 echo "=== Running gclient sync (with iOS support enabled) ==="
 cd "$WEBRTC_DIR"
-gclient sync -D --with_branch_heads
+gclient sync -D --with_branch_heads --force
 
 echo "WebRTC source sync completed successfully!"
