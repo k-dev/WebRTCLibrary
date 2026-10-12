@@ -1,7 +1,22 @@
 #!/bin/bash
 set -e
 
-BRANCH_HEAD=${1:-""}
+BRANCH_HEAD=""
+INTERACTIVE=true
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --non-interactive) INTERACTIVE=false ;;
+        --help|-h) echo "Usage: $0 [--non-interactive] [branch-head (e.g. 8078 or 8078_12)]"; exit 0 ;;
+        *)
+            if [ -n "$BRANCH_HEAD" ] || [[ ! "$1" =~ ^[0-9]+(_[0-9]+)?$ ]]; then
+                echo "Invalid branch-head: $1" >&2; exit 1
+            fi
+            BRANCH_HEAD="$1"
+            INTERACTIVE=false
+            ;;
+    esac
+    shift
+done
 WORK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEBRTC_DIR="$WORK_DIR/webrtc"
 DEPOT_TOOLS_DIR="$WEBRTC_DIR/depot_tools"
@@ -22,21 +37,20 @@ if [ ! -d "src" ]; then
     echo "WebRTC source tree not found. Fetching now (this will take a while)..."
     fetch --nohooks webrtc
     cd src
-    if [ -n "$BRANCH_HEAD" ]; then
-        BRANCH="branch-heads/$BRANCH_HEAD"
-        echo "Checking out initial version $BRANCH_HEAD (Branch: $BRANCH)..."
-        git fetch origin
-        git checkout refs/remotes/"$BRANCH"
-    fi
 else
     cd src
     echo "WebRTC source directory found."
 fi
 
+if ! git rev-parse --verify HEAD >/dev/null 2>&1 || [ -n "$(git rev-parse --show-prefix)" ]; then
+    echo "Error: webrtc/src is not a standalone Git checkout." >&2
+    exit 1
+fi
+
 # 2. Interactive version prompt once source is in place
 CURRENT_BRANCH=$(git branch --show-current)
 CURRENT_COMMIT=$(git rev-parse --short HEAD)
-CURRENT_POSITION=$(git log -n 1 --grep="Cr-Commit-Position" --pretty=format:"%s" | sed 's/.*Cr-Commit-Position: //')
+CURRENT_POSITION=$(git log -1 --format=%B | sed -n 's/^Cr-Commit-Position: //p')
 CURRENT_REF=$(git name-rev --name-only HEAD)
 
 echo ""
@@ -48,31 +62,47 @@ echo "Current Git Reference : $CURRENT_REF"
 echo "--------------------------------------------------"
 echo ""
 
-echo "Please see https://chromiumdash.appspot.com/branches for branch-heads and milestones"
+if $INTERACTIVE; then
+    echo "For milestone selection, use ./scripts/create_lib.sh."
+    read -r -p "Press [Enter] to keep this checkout, or enter a branch-head (e.g. 8078): " BRANCH_HEAD
+fi
 
-read -p "To preserve current checkout Press [Enter], or type a new BRANCH_HEADER (e.g., 8078) to switch to: " USER_INPUT
-
-if [ -n "$USER_INPUT" ]; then
-    BRANCH_HEAD="$USER_INPUT"
-    echo "Switching to branch head $BRANCH_HEAD..."
-    BRANCH="branch-heads/$BRANCH_HEAD"
-
-    echo "Switching to branch head $BRANCH_HEAD (Mapping to branch: $BRANCH)..."
-
-    # 1. Fetch all remote branch heads
-    git fetch origin "+refs/branch-heads/*:refs/remotes/branch-heads/*"
-
-    # 2. List recent branch heads to find the number you want
-    git branch -r | grep "branch-heads/" | tail -n 10
-
-    # 3. Detach HEAD onto the target branch (e.g., branch-heads/7920)
-    git checkout "refs/remotes/${BRANCH}"
+if [ -n "$BRANCH_HEAD" ]; then
+    [[ "$BRANCH_HEAD" =~ ^[0-9]+(_[0-9]+)?$ ]] || { echo "Invalid branch-head." >&2; exit 1; }
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Cannot switch versions: WebRTC has local changes. Commit or stash them first." >&2
+        exit 1
+    fi
+    echo "Switching to branch-head $BRANCH_HEAD..."
+    git fetch origin "+refs/branch-heads/$BRANCH_HEAD:refs/remotes/branch-heads/$BRANCH_HEAD"
+    git checkout --detach "refs/remotes/branch-heads/$BRANCH_HEAD"
 else
     echo "Keeping current version configuration."
 fi
 
 echo "=== Running gclient sync (with iOS support enabled) ==="
 cd "$WEBRTC_DIR"
-gclient sync -D --with_branch_heads --force
+# A fresh `fetch webrtc` checkout does not necessarily include iOS dependencies.
+# Preserve existing configuration and add the required target OS values if needed.
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+config = Path('.gclient')
+text = config.read_text()
+targets = []
+for node in ast.parse(text).body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == 'target_os'
+        for target in node.targets
+    ):
+        targets = list(ast.literal_eval(node.value))
+required = list(dict.fromkeys(targets + ['ios', 'mac']))
+if required != targets:
+    with config.open('a') as output:
+        output.write('\n# Required by the local Apple framework builders.\n')
+        output.write(f'target_os = {required!r}\n')
+PY
+gclient sync #-D --with_branch_heads --force
 
 echo "WebRTC source sync completed successfully!"
