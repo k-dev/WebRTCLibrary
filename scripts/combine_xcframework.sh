@@ -17,6 +17,7 @@ if [ "$#" -lt 1 ]; then
 fi
 
 XCFRAMEWORK_ARGS=()
+FRAMEWORKS=()
 
 echo "Scanning specified directories for frameworks and dSYMs..."
 
@@ -30,6 +31,7 @@ for dir_name in "$@"; do
                 FOUND=true
                 # xcodebuild requires absolute paths for reliability
                 abs_fw=$(realpath "$fw")
+                FRAMEWORKS+=("$abs_fw")
                 echo "  Found Framework: $fw"
                 XCFRAMEWORK_ARGS+=("-framework" "$abs_fw")
                 
@@ -81,11 +83,14 @@ cleanup() {
     rm -rf "$STAGE"
 }
 trap cleanup EXIT
+python3 "$WORK_DIR/scripts/lib/build_info.py" combine "$STAGE/WebRTC.build-info.json" "${FRAMEWORKS[@]}"
 echo "Creating XCFramework at '$OUTPUT_PATH'..."
 xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "$STAGE/WebRTC.xcframework"
+cp "$STAGE/WebRTC.build-info.json" "$STAGE/WebRTC.xcframework/WebRTC.build-info.json"
 if [ -e "$OUTPUT_PATH" ]; then
     mv "$OUTPUT_PATH" "$STAGE/previous.xcframework"
 fi
 mv "$STAGE/WebRTC.xcframework" "$OUTPUT_PATH"
+mv "$STAGE/WebRTC.build-info.json" "$OUTPUT_DIR/WebRTC.build-info.json"
 
 echo "Done! Successfully generated: $OUTPUT_PATH"

@@ -28,6 +28,9 @@ if [ ! -d "$SRC_DIR" ]; then
 fi
 
 cd "$SRC_DIR"
+METADATA=$(mktemp)
+trap 'rm -f "$METADATA"' EXIT
+python3 "$WORK_DIR/scripts/lib/build_info.py" capture "$METADATA" "$WORK_DIR" "$BUILD_CONFIG"
 
 echo "=== Building WebRTC for iOS (Device & Simulator) ==="
 # WebRTC's official build utility handles device/simulator compilation and packaging
@@ -35,6 +38,17 @@ echo "=== Building WebRTC for iOS (Device & Simulator) ==="
     -o "$OUTPUT_DIR/" \
     --build_config "$BUILD_CONFIG" \
     --arch "${ARCHS[@]}"
+
+for platform in device simulator; do
+    BUILT_ARCHS=()
+    for arch in "${ARCHS[@]}"; do
+        if [ "${arch%%:*}" = "$platform" ]; then BUILT_ARCHS+=("${arch#*:}"); fi
+    done
+    if [ "${#BUILT_ARCHS[@]}" -gt 0 ]; then
+        python3 "$WORK_DIR/scripts/lib/build_info.py" embed "$OUTPUT_DIR/$platform/WebRTC.framework" \
+            "$METADATA" "$WORK_DIR" "ios-$platform" "${BUILT_ARCHS[@]}"
+    fi
+done
 
 echo "iOS build completed! XCFramework and dSYMs are located at:"
 echo "$OUTPUT_DIR"

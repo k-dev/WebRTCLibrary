@@ -37,6 +37,11 @@ while [ "$#" -gt 0 ]; do
 done
 exit 1
 ''')
+        (self.root / '.gitignore').write_text('webrtc/\nartifacts/\nbin/\ncalls\n__pycache__/\n')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=Test',
+                        '-c', 'user.email=test@example.test', 'commit', '-qm', 'builder'], check=True)
 
     def stub(self, name, body, directory=None):
         path = (directory or self.bin) / name
@@ -113,13 +118,17 @@ exit 1
             'combine_xcframework.sh ios/device ios/simulator macos-x64 config=debug'])
 
     def test_ios_receives_exact_architectures_and_configuration(self):
-        self.stub('build_ios_libs.sh', '#!/bin/bash\nprintf "%s\\n" "$@" > "$CALLS"\n',
+        self.init_source()
+        self.stub('build_ios_libs.sh', '#!/bin/bash\nprintf "%s\\n" "$@" > "$CALLS"\nmkdir -p out/ios/simulator/WebRTC.framework\n',
                   self.src / 'tools_webrtc' / 'ios')
         result = self.run_script('build_ios.sh', 'simulator:arm64', BUILD_CONFIG='debug')
         self.assert_success(result)
         args = (self.root / 'calls').read_text().splitlines()
         self.assertEqual(args[-4:], ['--build_config', 'debug', '--arch', 'simulator:arm64'])
         self.assertNotIn('device:arm64', args)
+        data = json.loads((self.src / 'out/ios/simulator/WebRTC.framework/WebRTC.build-info.json').read_text())
+        self.assertEqual(data['architectures'], ['arm64'])
+        self.assertEqual(data['configuration'], 'debug')
         self.assertNotEqual(self.run_script('build_ios.sh', 'bad').returncode, 0)
 
     def test_prepare_preserves_sync_flags_and_enables_apple_dependencies(self):
@@ -142,6 +151,13 @@ exit 1
         self.assertEqual((self.src / 'tracked').read_text(), 'changed')
 
     def test_macos_universal_merges_framework_and_symbols(self):
+        self.init_source()
+        headers = self.src / 'sdk/objc/api/peerconnection'
+        headers.mkdir(parents=True)
+        (headers / 'RTCAudioSource.h').write_text(
+            '#import "sdk/objc/base/RTCMacros.h"\n'
+            '#import "sdk/objc/api/peerconnection/RTCMediaSource.h"\n'
+            '#import "sdk/objc/RTCExample.h"\n')
         self.stub('gn', '''#!/bin/bash
 out="$2"
 mkdir -p "$out/WebRTC.framework/Versions/A" "$out/WebRTC.framework.dSYM/Contents/Resources/DWARF"
@@ -158,10 +174,65 @@ printf '%s\\n' "$*" >> "$CALLS"
         dest = self.src / 'out' / 'macos-universal'
         self.assertEqual((dest / 'WebRTC.framework' / 'WebRTC').read_text(), 'merged\n')
         self.assertEqual((dest / 'WebRTC.framework.dSYM' / 'Contents' / 'Resources' / 'DWARF' / 'WebRTC').read_text(), 'merged\n')
+        expected_header = ('#import <WebRTC/RTCMacros.h>\n'
+                           '#import <WebRTC/RTCMediaSource.h>\n'
+                           '#import <WebRTC/RTCExample.h>\n')
+        for directory in ('macos-arm64', 'macos-x64', 'macos-universal'):
+            header = self.src / 'out' / directory / 'WebRTC.framework/Versions/A/Headers/RTCAudioSource.h'
+            self.assertEqual(header.read_text(), expected_header)
         self.assertIn('is_debug=false', (self.root / 'calls').read_text())
+        data = json.loads((dest / 'WebRTC.framework/Versions/A/Resources/WebRTC.build-info.json').read_text())
+        self.assertEqual(data['architectures'], ['arm64', 'x64'])
+
+    def make_manifest(self, framework):
+        framework.mkdir(parents=True, exist_ok=True)
+        data = {'schema_version': 1, 'webrtc': {'commit': 'source', 'dirty': False},
+                'builder': {'commit': 'builder', 'dirty': False}, 'configuration': 'release',
+                'toolchain': 'Xcode fixture', 'platform': 'macos', 'architectures': ['arm64']}
+        (framework / 'WebRTC.build-info.json').write_text(json.dumps(data))
+        return data
+
+    def test_packaging_rejects_mismatched_and_missing_metadata(self):
+        first = self.src / 'out/first/WebRTC.framework'
+        second = self.src / 'out/second/WebRTC.framework'
+        self.make_manifest(first)
+        data = self.make_manifest(second)
+        for key, value in [('configuration', 'debug'), ('webrtc', {'commit': 'older'}),
+                           ('builder', {'commit': 'other'}), ('toolchain', 'Other Xcode')]:
+            changed = dict(data, **{key: value})
+            (second / 'WebRTC.build-info.json').write_text(json.dumps(changed))
+            result = self.run_script('combine_xcframework.sh', 'first', 'second')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('different source identities', result.stderr)
+        (second / 'WebRTC.build-info.json').unlink()
+        self.assertNotEqual(self.run_script('combine_xcframework.sh', 'second').returncode, 0)
+
+    def test_source_mutation_during_compilation_is_rejected(self):
+        self.init_source()
+        self.stub('build_ios_libs.sh', '#!/bin/bash\necho changed > tracked\nmkdir -p out/ios/device/WebRTC.framework\n',
+                  self.src / 'tools_webrtc/ios')
+        result = self.run_script('build_ios.sh', 'device:arm64')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('changed during compilation', result.stderr)
+
+    def test_local_changes_have_distinct_fingerprints(self):
+        self.init_source(dirty=True)
+        helper = self.root / 'scripts/lib/build_info.py'
+        output = self.root / 'artifacts/snapshot.json'
+        output.parent.mkdir()
+        def capture():
+            subprocess.run(['python3', str(helper), 'capture', str(output),
+                            str(self.root), 'release'], env=self.env, check=True)
+            return json.loads(output.read_text())['webrtc']
+        first = capture()
+        (self.src / 'tracked').write_text('different local edit')
+        second = capture()
+        self.assertTrue(first['dirty'])
+        self.assertEqual(first['commit'], second['commit'])
+        self.assertNotEqual(first['changes_sha256'], second['changes_sha256'])
 
     def test_failed_packaging_preserves_previous_artifact(self):
-        (self.src / 'out' / 'macos-arm64' / 'WebRTC.framework').mkdir(parents=True)
+        self.make_manifest(self.src / 'out' / 'macos-arm64' / 'WebRTC.framework')
         old = self.root / 'artifacts' / 'WebRTC.xcframework'
         old.mkdir(parents=True)
         (old / 'marker').write_text('previous')
@@ -170,6 +241,9 @@ printf '%s\\n' "$*" >> "$CALLS"
         self.assertEqual((old / 'marker').read_text(), 'previous')
         self.assert_success(self.run_script('combine_xcframework.sh', 'macos-arm64'))
         self.assertEqual((old / 'marker').read_text(), 'new\n')
+        manifest = self.root / 'artifacts/WebRTC.build-info.json'
+        self.assertEqual(json.loads(manifest.read_text())['webrtc']['commit'], 'source')
+        self.assertEqual(manifest.read_text(), (old / 'WebRTC.build-info.json').read_text())
 
 
 class MilestoneTests(unittest.TestCase):

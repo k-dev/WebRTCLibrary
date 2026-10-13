@@ -98,6 +98,21 @@ previous steps are placed.
 
 ---
 
+## Build provenance
+
+Each newly built framework contains `WebRTC.build-info.json` (in `Resources` for
+versioned macOS bundles). It records the full WebRTC and builder Git commits,
+local-change fingerprints, WebRTC reference and commit position, configuration,
+Xcode version, platform, and architectures. References are descriptive; the full
+commit SHA identifies the source. A milestone is not inferred from a branch name.
+
+The combined manifest is saved both inside `artifacts/WebRTC.xcframework` and as
+`artifacts/WebRTC.build-info.json`. Inspect it with:
+
+```bash
+python3 -m json.tool artifacts/WebRTC.build-info.json
+```
+
 ## Integration into Other Projects
 
 1. Open host application project in **Xcode**.
