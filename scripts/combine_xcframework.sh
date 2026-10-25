@@ -18,6 +18,8 @@ fi
 
 XCFRAMEWORK_ARGS=()
 FRAMEWORKS=()
+DSYMS=()
+SYMBOL_DIRS=()
 
 echo "Scanning specified directories for frameworks and dSYMs..."
 
@@ -42,14 +44,16 @@ for dir_name in "$@"; do
                 if [ -d "$dsym" ]; then
                     abs_dsym=$(realpath "$dsym")
                     echo "  Found matching dSYM: $dsym"
-                    XCFRAMEWORK_ARGS+=("-debug-symbols" "$abs_dsym")
+                    DSYMS+=("$abs_dsym")
+                    SYMBOL_DIRS+=("$dir_name")
                 else
                     # Alternative check based on framework name in the same dir
                     possible_dsym="$dir/${fw_name}.framework.dSYM"
                     if [ -d "$possible_dsym" ]; then
                         abs_dsym=$(realpath "$possible_dsym")
                         echo "  Found matching dSYM: $possible_dsym"
-                        XCFRAMEWORK_ARGS+=("-debug-symbols" "$abs_dsym")
+                        DSYMS+=("$abs_dsym")
+                        SYMBOL_DIRS+=("$dir_name")
                     fi
                 fi
             fi
@@ -87,10 +91,27 @@ python3 "$WORK_DIR/scripts/lib/build_info.py" combine "$STAGE/WebRTC.build-info.
 echo "Creating XCFramework at '$OUTPUT_PATH'..."
 xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "$STAGE/WebRTC.xcframework"
 cp "$STAGE/WebRTC.build-info.json" "$STAGE/WebRTC.xcframework/WebRTC.build-info.json"
+mkdir -p "$STAGE/symbols"
+cp "$STAGE/WebRTC.build-info.json" "$STAGE/symbols/"
+for ((i=0; i<${#DSYMS[@]}; i++)); do
+    destination="$STAGE/symbols/${SYMBOL_DIRS[$i]}"
+    mkdir -p "$destination"
+    cp -R "${DSYMS[$i]}" "$destination/"
+    dwarfdump --uuid "${DSYMS[$i]}" >> "$STAGE/symbols/UUIDs.txt"
+done
+python3 - "$STAGE" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+stage = Path(sys.argv[1])
+shutil.make_archive(str(stage / 'WebRTC.symbols'), 'zip', stage, 'symbols')
+PY
 if [ -e "$OUTPUT_PATH" ]; then
     mv "$OUTPUT_PATH" "$STAGE/previous.xcframework"
 fi
 mv "$STAGE/WebRTC.xcframework" "$OUTPUT_PATH"
 mv "$STAGE/WebRTC.build-info.json" "$OUTPUT_DIR/WebRTC.build-info.json"
+mv "$STAGE/WebRTC.symbols.zip" "$OUTPUT_DIR/WebRTC.symbols.zip"
 
 echo "Done! Successfully generated: $OUTPUT_PATH"
+echo "Debug symbols: $OUTPUT_DIR/WebRTC.symbols.zip"

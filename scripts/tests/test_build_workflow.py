@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -236,14 +237,44 @@ printf '%s\\n' "$*" >> "$CALLS"
         old = self.root / 'artifacts' / 'WebRTC.xcframework'
         old.mkdir(parents=True)
         (old / 'marker').write_text('previous')
+        symbols = self.root / 'artifacts/WebRTC.symbols.zip'
+        symbols.write_bytes(b'previous symbols')
         result = self.run_script('combine_xcframework.sh', 'macos-arm64', FAIL_PACKAGE='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((old / 'marker').read_text(), 'previous')
+        self.assertEqual(symbols.read_bytes(), b'previous symbols')
         self.assert_success(self.run_script('combine_xcframework.sh', 'macos-arm64'))
         self.assertEqual((old / 'marker').read_text(), 'new\n')
         manifest = self.root / 'artifacts/WebRTC.build-info.json'
         self.assertEqual(json.loads(manifest.read_text())['webrtc']['commit'], 'source')
         self.assertEqual(manifest.read_text(), (old / 'WebRTC.build-info.json').read_text())
+        with zipfile.ZipFile(symbols) as archive:
+            self.assertEqual(archive.read('symbols/WebRTC.build-info.json').decode(), manifest.read_text())
+
+    def test_symbols_are_packaged_separately_per_platform(self):
+        self.stub('dwarfdump', '#!/bin/bash\necho "UUID: fixture (arm64) $2"\n')
+        self.stub('xcodebuild', '''#!/bin/bash
+for arg in "$@"; do
+    if [ "$arg" = -debug-symbols ]; then exit 8; fi
+done
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -output ]; then mkdir -p "$2"; exit 0; fi
+    shift
+done
+exit 1
+''')
+        for platform, name in [('ios/device', 'WebRTC.dSYM'),
+                               ('macos-universal', 'WebRTC.framework.dSYM')]:
+            directory = self.src / 'out' / platform
+            self.make_manifest(directory / 'WebRTC.framework')
+            dwarf = directory / name / 'Contents/Resources/DWARF/WebRTC'
+            dwarf.parent.mkdir(parents=True)
+            dwarf.write_text(platform)
+        self.assert_success(self.run_script('combine_xcframework.sh', 'ios/device', 'macos-universal'))
+        with zipfile.ZipFile(self.root / 'artifacts/WebRTC.symbols.zip') as archive:
+            self.assertEqual(archive.read('symbols/ios/device/WebRTC.dSYM/Contents/Resources/DWARF/WebRTC'), b'ios/device')
+            self.assertEqual(archive.read('symbols/macos-universal/WebRTC.framework.dSYM/Contents/Resources/DWARF/WebRTC'), b'macos-universal')
+            self.assertEqual(archive.read('symbols/UUIDs.txt').count(b'UUID: fixture'), 2)
 
 
 class MilestoneTests(unittest.TestCase):
