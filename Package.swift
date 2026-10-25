@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "LocalWebRTCLibrary",
+    name: "WebRTCLibrary",
     platforms: [
         .iOS(.v13),
         .macOS(.v11)
