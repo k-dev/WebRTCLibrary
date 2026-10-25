@@ -11,6 +11,12 @@ This workspace builds Google WebRTC locally and packages it for integration into
 
 ## Instructions
 
+### Adding to Swift.package dependencies
+
+```
+.package(url: "https://github.com/k-dev/macWebRTCLibrary.git", from: "0.1.0-m156")
+```
+
 ### Interactive build (recommended)
 
 ```bash
